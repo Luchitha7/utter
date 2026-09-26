@@ -2,9 +2,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/build/Utter.app"
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -target "$(uname -m)-apple-macos14.0" -parse-as-library -swift-version 5 -O -framework AppKit -framework SwiftUI -framework AVFoundation -framework Speech -framework Carbon -framework EventKit "$ROOT/Sources/Utter.swift" -o "$APP/Contents/MacOS/Utter"
-printf '%s' "$ROOT" > "$APP/Contents/Resources/workspace.txt"
+swiftc -target "$(uname -m)-apple-macos14.0" -parse-as-library -swift-version 5 -O -framework AppKit -framework SwiftUI -framework AVFoundation -framework Speech -framework Carbon -framework EventKit "$ROOT/Sources/Utter.swift" "$ROOT"/Sources/Core/*.swift -o "$APP/Contents/MacOS/Utter"
 cp "$ROOT/scripts/create-note.applescript" "$APP/Contents/Resources/"
 ICONSET="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$ICONSET"
