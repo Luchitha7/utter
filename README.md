@@ -46,10 +46,11 @@ ollama pull qwen3:4b-instruct
 git clone https://github.com/Luchitha7/utter.git
 cd utter
 ./scripts/build.sh
-open build/Utter.app
+cp -R build/Utter.app /Applications/
+open /Applications/Utter.app
 ```
 
-The build is ad-hoc signed for your own Mac and isn't notarized. The app runs its Python backend from the folder you cloned, so keep the folder in place and rebuild if you move it. Utter uses the Python that ships with the Command Line Tools and needs no extra packages.
+`Utter.app` is self-contained: move it anywhere, and delete the cloned folder if you like. The build is ad-hoc signed for your own Mac and isn't notarized.
 
 On first use, macOS asks for permission to use the **microphone** and **speech recognition**. It asks again the first time Utter creates a note (**Notes automation**) or a reminder (**Reminders**).
 
@@ -67,14 +68,12 @@ You can also type a command and press **Run**. **Preview only** shows the planne
 
 ```
  ⌘⇧Space ─▶ microphone ─▶ Apple Speech ─▶ transcript
-                                              │  JSON over a private pipe
-                                              ▼
-                                    backend/engine.py
                                               │
                            ┌──────────────────┴──────────────────┐
                     while speaking                         when you finish
-                 fixed phrases only                 backend/planner.py ─▶ Ollama
-                 (early “open X”)                   (qwen3:4b-instruct, tool calling)
+                  Grammar.swift                     Planner.swift ─▶ Ollama (HTTP, localhost)
+              fixed phrases only                    qwen3:4b-instruct, tool calling
+              (early “open X”)
                            └──────────────────┬──────────────────┘
                                               ▼
                                   validated list of steps
@@ -84,9 +83,11 @@ You can also type a command and press **Run**. **Preview only** shows the planne
             · shortcuts CLI · osascript (volume)
 ```
 
-- **The Swift app** ([`Sources/Utter.swift`](Sources/Utter.swift)) handles the hotkey, microphone, speech recognition, the window and menu-bar icon, and the actions themselves.
-- **The Python backend** ([`backend/`](backend/)) reads JSON requests from the app. It uses only the Python standard library.
-- **The planner** ([`backend/planner.py`](backend/planner.py)) asks the model to choose from seven fixed tools, then checks every call before anything runs.
+- **The app** ([`Sources/Utter.swift`](Sources/Utter.swift)) handles the hotkey, microphone, speech recognition, the window and menu-bar icon, and the actions themselves.
+- **The planner** ([`Sources/Core/Planner.swift`](Sources/Core/Planner.swift)) asks the model to choose from seven fixed tools, then checks every call before anything runs.
+- **The grammar** ([`Sources/Core/Grammar.swift`](Sources/Core/Grammar.swift)) recognises the fixed phrases, and **the app catalog** ([`Sources/Core/AppCatalog.swift`](Sources/Core/AppCatalog.swift)) matches spoken app names to installed apps.
+
+Everything is plain Swift with no third-party dependencies.
 
 ### Safety
 
@@ -98,18 +99,23 @@ You can also type a command and press **Run**. **Preview only** shows the planne
 ## Development
 
 ```sh
-python3 -m unittest discover -s tests -v   # fast unit tests, no model needed
-python3 tests/live_planner.py              # plans real commands with Ollama; executes nothing
-./scripts/build.sh                         # builds build/Utter.app
+./scripts/test.sh         # core tests, no model needed (Command Line Tools only, no Xcode)
+./scripts/live-check.sh   # plans real commands with Ollama; executes nothing
+./scripts/build.sh        # builds build/Utter.app
 ```
 
-Logs are written to `~/Library/Logs/Utter/engine.log`. To use a different Ollama model or server, set `UTTER_MODEL` or `UTTER_OLLAMA_URL`.
+Errors are logged to `~/Library/Logs/Utter/utter.log`; transcripts and note text are never written to disk. To use a different Ollama model or server:
+
+```sh
+defaults write io.github.luchitha7.utter OllamaModel qwen3:4b-instruct
+defaults write io.github.luchitha7.utter OllamaURL http://127.0.0.1:11434
+```
 
 ### Adding a tool
 
-1. Describe it in `TOOLS` and validate its arguments in `Planner.validate` ([`backend/planner.py`](backend/planner.py)).
+1. Add a case to `Step`, describe the tool in `Planner.tools`, and validate its arguments in `Planner.validate` ([`Sources/Core/Planner.swift`](Sources/Core/Planner.swift)).
 2. Carry it out in `perform(_:)` ([`Sources/Utter.swift`](Sources/Utter.swift)).
-3. Add a unit test in [`tests/test_planner.py`](tests/test_planner.py) and a spoken example in [`tests/live_planner.py`](tests/live_planner.py).
+3. Add a check in [`tests/CoreTests.swift`](tests/CoreTests.swift) and a spoken example in [`tests/LivePlanner.swift`](tests/LivePlanner.swift).
 
 ## Limitations
 
