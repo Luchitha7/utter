@@ -5,12 +5,6 @@ import Speech
 import Carbon
 import EventKit
 
-struct PlanError: LocalizedError {
-    let message: String
-    init(_ message: String) { self.message = message }
-    var errorDescription: String? { message }
-}
-
 struct Activity: Identifiable {
     let id = UUID()
     let text: String
@@ -31,11 +25,8 @@ final class Assistant: ObservableObject {
     @Published var typedCommand = ""
     @Published var busy = false
     @Published var dryRun = false
-    private var worker: Process?
-    private var input: FileHandle?
-    private var output: FileHandle?
-    private var errorLog: FileHandle?
-    private var responseBuffer = Data()
+    private let planner: Planner
+    private var planTask: Task<Void, Never>?
     private var recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let audio = AVAudioEngine()
     private var speechRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -43,21 +34,23 @@ final class Assistant: ObservableObject {
     private var tapInstalled = false
     private var debounce: Task<Void, Never>?
     private var session = UUID().uuidString
-    private var revision = 0
-    private var inFlight: String?
-    private var pending: [String: Any]?
     private var completed: Set<String> = []
     private var ending = false
     private var starting = false
     private var isFinishing = false
     private var finishTask: Task<Void, Never>?
-    private var workerStopped = false
+    private let logFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Utter/utter.log")
 
     init() {
         speechInfo = recognizer?.supportsOnDeviceRecognition == true
             ? "Speech stays on this Mac · English (US)"
             : "Speech uses Apple’s recognition service · English (US)"
-        startWorker()
+        let environment = ProcessInfo.processInfo.environment, defaults = UserDefaults.standard
+        let model = environment["UTTER_MODEL"] ?? defaults.string(forKey: "OllamaModel") ?? "qwen3:4b-instruct"
+        let server = environment["UTTER_OLLAMA_URL"] ?? defaults.string(forKey: "OllamaURL") ?? "http://127.0.0.1:11434"
+        planner = Planner(model: model, server: URL(string: server) ?? URL(string: "http://127.0.0.1:11434")!)
+        ready = true
+        Task { await startPlanner() }
     }
 
     func log(_ text: String) {
@@ -65,124 +58,93 @@ final class Assistant: ObservableObject {
         activities = Array(activities.prefix(12))
     }
 
-    func startWorker() {
-        let resources = Bundle.main.resourceURL!
-        guard let root = try? String(contentsOf: resources.appendingPathComponent("workspace.txt"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) else {
-            status = "Missing workspace configuration"; return
+    /// Diagnostics for bug reports. Only errors are written; transcripts and note text stay in memory.
+    private func record(_ message: String) {
+        try? FileManager.default.createDirectory(at: logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let line = Data("\(ISO8601DateFormatter().string(from: Date())) \(message)\n".utf8)
+        if let handle = try? FileHandle(forWritingTo: logFile) {
+            _ = try? handle.seekToEnd(); try? handle.write(contentsOf: line); try? handle.close()
+        } else {
+            try? line.write(to: logFile)
         }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = ["-u", root + "/backend/engine.py"]
-        process.currentDirectoryURL = URL(fileURLWithPath: root)
-        let incoming = Pipe(), outgoing = Pipe()
-        process.standardInput = incoming
-        process.standardOutput = outgoing
-        let logs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Utter")
-        try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
-        let logURL = logs.appendingPathComponent("engine.log")
-        if !FileManager.default.fileExists(atPath: logURL.path) { FileManager.default.createFile(atPath: logURL.path, contents: nil) }
-        errorLog = try? FileHandle(forWritingTo: logURL)
-        _ = try? errorLog?.seekToEnd()
-        process.standardError = errorLog ?? FileHandle.standardError
-        input = incoming.fileHandleForWriting
-        output = outgoing.fileHandleForReading
-        output?.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { handle.readabilityHandler = nil; return }
-            guard let self else { return }
-            Task { @MainActor in self.receive(data) }
-        }
-        process.terminationHandler = { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                guard !self.workerStopped else { return }
-                self.ready = false; self.busy = false; self.inFlight = nil
-                self.modelStatus = "Engine stopped — reopen Utter"
-                self.status = "Local engine stopped. See ~/Library/Logs/Utter/engine.log"
-            }
-        }
+    }
+
+    private func fail(_ message: String) {
+        status = message; log(message); record(message)
+    }
+
+    private func startPlanner() async {
+        planner.shortcuts = await Planner.listShortcuts()
         do {
-            try process.run(); worker = process
-            send(["type": "load"])
-        } catch { status = error.localizedDescription; modelStatus = "Engine unavailable" }
-    }
-
-    private func send(_ object: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object), let input else { return }
-        do { try input.write(contentsOf: data + Data([10])) }
-        catch { status = "Could not reach the local engine"; busy = false }
-    }
-
-    private func receive(_ data: Data) {
-        responseBuffer.append(data)
-        while let newline = responseBuffer.firstIndex(of: 10) {
-            let line = responseBuffer[..<newline]
-            responseBuffer.removeSubrange(...newline)
-            guard let result = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
-            handle(result)
-        }
-    }
-
-    private func handle(_ result: [String: Any]) {
-        if result["type"] as? String == "ready" {
-            ready = true; modelStatus = "\(result["device"] as? String ?? "Local AI") · on this Mac"
+            modelStatus = try await planner.warm() + " · on this Mac"
             log("Local AI ready. Nothing leaves your Mac.")
-            return
+        } catch {
+            modelStatus = "AI unavailable · using Exact commands"
+            if engine == "ai" { engine = "exact" }
+            log(error.localizedDescription); record("AI startup: " + error.localizedDescription)
         }
-        if result["type"] as? String == "error" {
-            let message = result["message"] as? String ?? "Unknown error"
-            log("Engine: " + message)
-            if result["id"] as? String == nil { modelStatus = "AI unavailable · using Exact commands"; engine = "exact"; ready = true }
-        }
-        guard let id = result["id"] as? String, id == inFlight else { return }
-        inFlight = nil; busy = false
-        defer { pump() }
-        guard id.hasPrefix(session + ":") else { return }
-        guard let sourceText = result["text"] as? String,
-              transcript.lowercased().hasPrefix(sourceText.lowercased()) else { return }
-        let action = result["action"] as? String ?? "wait"
-        if action == "cancel" { cancel(); return }
-        if action == "plan" { runPlan(result); return }
-        // A correction or cancellation in a newer partial transcript invalidates old decisions.
-        let lower = transcript.lowercased()
-        let bodyStart = lower.range(of: "\\s(?:saying|that says|with the text)\\s", options: .regularExpression)
-        let commandPart = bodyStart.map { String(lower[..<$0.lowerBound]) } ?? lower
-        if commandPart.range(of: "\\b(actually|instead|cancel|never mind|don't|do not|wait)\\b", options: .regularExpression) != nil {
-            status = "Correction heard. Start a fresh command."; return
-        }
-        latency = "\(result["ms"] as? Int ?? 0) ms"
-        guard let key = result["key"] as? String, !completed.contains(key), action != "wait" else {
-            if let reason = result["reason"] as? String { status = reason }
-            return
-        }
-        completed.insert(key)
-        if dryRun {
-            log("Preview: \(action == "note" ? "create note" : "open " + (result["app"] as? String ?? "app"))")
-            status = "Preview only — nothing changed"
-            if ending && engine != "ai" && action == "open" && result["has_note"] as? Bool == true { enqueue(final: true) }
-            return
-        }
-        if action == "open", let bundle = result["bundle"] as? String {
-            let allowed = ["com.apple.Notes", "com.apple.Safari", "com.google.Chrome", "com.apple.finder", "com.apple.Music", "com.spotify.client"]
-            guard allowed.contains(bundle), let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else {
-                status = "That app isn’t installed"; log(status); return
+    }
+
+    /// Decides what the current transcript asks for. Partial transcripts only use the fixed phrases,
+    /// so a plain "open Safari" can start while the user is still speaking.
+    private func evaluate(final: Bool) {
+        let text = transcript
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if final && engine == "ai" { plan(text); return }
+        let started = Date()
+        let decision = Grammar.decide(text, final: final, completed: completed)
+        latency = "\(Int(Date().timeIntervalSince(started) * 1000)) ms"
+        switch decision.action {
+        case .cancel:
+            cancel()
+        case .wait(let reason):
+            status = reason
+        case .open(let app, let bundle, let hasNote):
+            guard let key = decision.key else { return }
+            completed.insert(key)
+            let continueWithNote = { [weak self] in
+                guard let self, self.ending, self.engine != "ai", hasNote else { return }
+                self.evaluate(final: true)
             }
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
-            let appName = result["app"] as? String ?? "app"
+            if dryRun { log("Preview: open \(app)"); status = "Preview only — nothing changed"; continueWithNote(); return }
+            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { fail("That app isn’t installed"); return }
             let actionSession = session
-            NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] _, error in
-                Task { @MainActor in
-                    guard let self, self.session == actionSession else { return }
-                    if let error { self.status = error.localizedDescription; self.log(self.status) }
-                    else {
-                        self.status = "Opened \(appName)"; self.log(self.status)
-                        if self.ending && self.engine != "ai" && result["has_note"] as? Bool == true { self.enqueue(final: true) }
-                    }
+            Task { @MainActor in
+                do {
+                    let configuration = NSWorkspace.OpenConfiguration()
+                    configuration.activates = true
+                    _ = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+                    guard session == actionSession else { return }
+                    status = "Opened \(app)"; log(status); continueWithNote()
+                } catch {
+                    guard session == actionSession else { return }
+                    fail(error.localizedDescription)
                 }
             }
-        } else if action == "note", let body = result["body"] as? String, result["final"] as? Bool == true {
+        case .note(let body):
+            guard final, let key = decision.key else { return }
+            completed.insert(key)
+            if dryRun { log("Preview: create note"); status = "Preview only — nothing changed"; return }
             createNote(body)
+        }
+    }
+
+    private func plan(_ text: String) {
+        if Grammar.decide(text, final: true).action == .cancel { cancel(); return }
+        planTask?.cancel()
+        let planSession = session, started = Date()
+        busy = true; status = "Thinking…"
+        planTask = Task { @MainActor in
+            defer { if session == planSession { busy = false } }
+            do {
+                let result = try await planner.plan(String(text.prefix(2000)))
+                guard session == planSession else { return }
+                latency = "\(Int(Date().timeIntervalSince(started) * 1000)) ms"
+                await run(result)
+            } catch {
+                guard session == planSession, !Task.isCancelled else { return }
+                fail(error.localizedDescription)
+            }
         }
     }
 
@@ -196,7 +158,7 @@ final class Assistant: ObservableObject {
                 status = "Note created"; log("Created note: " + String(body.prefix(80)))
             } catch {
                 guard session == actionSession else { return }
-                status = error.localizedDescription; log(status)
+                fail(error.localizedDescription)
             }
         }
     }
@@ -220,90 +182,76 @@ final class Assistant: ObservableObject {
         }
         if status != 0 {
             let detail = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw PlanError(failure + (detail.isEmpty ? "" : " " + detail.trimmingCharacters(in: .whitespacesAndNewlines)))
+            throw PlannerError(failure + (detail.isEmpty ? "" : " " + detail.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
     }
 
-    private func runPlan(_ result: [String: Any]) {
-        latency = "\(result["ms"] as? Int ?? 0) ms"
-        let say = result["say"] as? String ?? ""
-        let steps = (result["steps"] as? [[String: Any]] ?? []).filter { !completed.contains($0["key"] as? String ?? "") }
+    private func run(_ plan: Plan) async {
+        let steps = plan.steps.filter { !completed.contains($0.key) }
         guard !steps.isEmpty else {
-            status = say.isEmpty ? "Done" : say
-            if !say.isEmpty { log(say) }
+            status = plan.say.isEmpty ? "Done" : plan.say
+            if !plan.say.isEmpty { log(plan.say) }
             return
         }
-        for step in steps { if let key = step["key"] as? String { completed.insert(key) } }
+        steps.forEach { completed.insert($0.key) }
         if dryRun {
-            for step in steps { log("Preview: " + (step["summary"] as? String ?? "step")) }
+            for step in steps { log("Preview: " + step.summary) }
             status = "Preview only — nothing changed"; return
         }
         let actionSession = session
-        busy = true
-        Task { @MainActor in
-            defer { if session == actionSession { busy = inFlight != nil } }
-            for step in steps {
-                guard session == actionSession else { return }
-                status = (step["summary"] as? String ?? "Working") + "…"
-                do {
-                    try await perform(step)
-                    log(step["summary"] as? String ?? "Done")
-                } catch {
-                    status = error.localizedDescription; log(status); return
-                }
+        for step in steps {
+            guard session == actionSession else { return }
+            status = step.summary + "…"
+            do {
+                try await perform(step)
+                log(step.summary)
+            } catch {
+                fail(error.localizedDescription); return
             }
-            status = say.isEmpty ? "Done" : say
-            if !say.isEmpty { log(say) }
         }
+        status = plan.say.isEmpty ? "Done" : plan.say
+        if !plan.say.isEmpty { log(plan.say) }
     }
 
-    /// Executes one validated step. Each tool maps to a fixed native action; nothing is evaluated as code.
-    private func perform(_ step: [String: Any]) async throws {
-        switch step["tool"] as? String {
-        case "open_app":
-            guard let path = step["path"] as? String, path.hasSuffix(".app"), FileManager.default.fileExists(atPath: path) else {
-                throw PlanError("That app isn’t installed")
-            }
+    /// Executes one validated step. Each maps to a fixed native action; nothing is evaluated as code.
+    private func perform(_ step: Step) async throws {
+        switch step {
+        case .openApp(_, let path, _):
+            guard path.hasSuffix(".app"), FileManager.default.fileExists(atPath: path) else { throw PlannerError("That app isn’t installed") }
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true
             _ = try await NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: configuration)
-        case "create_note":
-            guard let body = step["body"] as? String, !body.isEmpty else { throw PlanError("The note was empty") }
+        case .createNote(let body):
             try await writeNote(body)
-        case "create_reminder":
-            guard let title = step["title"] as? String, !title.isEmpty else { throw PlanError("The reminder was empty") }
-            try await createReminder(title, due: step["due"] as? String)
-        case "run_shortcut":
-            guard let name = step["name"] as? String else { throw PlanError("Missing shortcut name") }
+        case .createReminder(let title, let due):
+            try await createReminder(title, due: due)
+        case .runShortcut(let name, let input):
             var arguments = ["run", name]
             var inputFile: URL?
-            if let input = step["input"] as? String, !input.isEmpty {
+            if let input, !input.isEmpty {
                 let file = FileManager.default.temporaryDirectory.appendingPathComponent("utter-\(UUID().uuidString).txt")
                 try input.write(to: file, atomically: true, encoding: .utf8)
                 arguments += ["--input-path", file.path]; inputFile = file
             }
             defer { if let inputFile { try? FileManager.default.removeItem(at: inputFile) } }
             try await runTool("/usr/bin/shortcuts", arguments, failure: "The shortcut “\(name)” failed.")
-        case "open_url":
-            guard let text = step["url"] as? String, let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
-                throw PlanError("That doesn’t look like a website address")
+        case .openURL(let text, _):
+            guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+                throw PlannerError("That doesn’t look like a website address")
             }
-            guard NSWorkspace.shared.open(url) else { throw PlanError("Could not open \(text)") }
-        case "set_volume":
-            guard let percent = step["percent"] as? Int, (0...100).contains(percent) else { throw PlanError("Invalid volume") }
+            guard NSWorkspace.shared.open(url) else { throw PlannerError("Could not open \(text)") }
+        case .setVolume(let percent):
             try await runTool("/usr/bin/osascript", ["-e", "on run argv", "-e", "set volume output volume (item 1 of argv as integer)", "-e", "end run", String(percent)],
                               failure: "Could not change the volume.")
-        default:
-            throw PlanError("Unsupported step")
         }
     }
 
     private func createReminder(_ title: String, due: String?) async throws {
         let store = EKEventStore()
         guard try await store.requestFullAccessToReminders() else {
-            throw PlanError("Allow Utter to use Reminders in System Settings → Privacy & Security.")
+            throw PlannerError("Allow Utter to use Reminders in System Settings → Privacy & Security.")
         }
-        guard let calendar = store.defaultCalendarForNewReminders() else { throw PlanError("No Reminders list found") }
+        guard let calendar = store.defaultCalendarForNewReminders() else { throw PlannerError("No Reminders list found") }
         let reminder = EKReminder(eventStore: store)
         reminder.title = title
         reminder.calendar = calendar
@@ -316,19 +264,6 @@ final class Assistant: ObservableObject {
             }
         }
         try store.save(reminder, commit: true)
-    }
-
-    private func enqueue(final: Bool) {
-        guard !transcript.isEmpty else { return }
-        revision += 1
-        pending = ["id": session + ":" + String(revision), "text": transcript, "final": final,
-                   "completed": Array(completed), "engine": engine]
-        pump()
-    }
-
-    private func pump() {
-        guard inFlight == nil, let request = pending else { return }
-        pending = nil; inFlight = request["id"] as? String; busy = true; send(request)
     }
 
     func toggle() {
@@ -374,7 +309,7 @@ final class Assistant: ObservableObject {
                         self.debounce = Task { @MainActor in
                             try? await Task.sleep(nanoseconds: 180_000_000)
                             guard !Task.isCancelled, self.listening else { return }
-                            self.enqueue(final: false)
+                            self.evaluate(final: false)
                         }
                     }
                 }
@@ -396,8 +331,8 @@ final class Assistant: ObservableObject {
     }
 
     private func resetSession() {
-        debounce?.cancel(); finishTask?.cancel(); isFinishing = false; stopAudio(); session = UUID().uuidString
-        pending = nil; completed = []; transcript = ""; ending = false
+        debounce?.cancel(); finishTask?.cancel(); planTask?.cancel(); isFinishing = false; stopAudio(); session = UUID().uuidString
+        completed = []; transcript = ""; ending = false; busy = false
     }
 
     func finish() {
@@ -418,7 +353,7 @@ final class Assistant: ObservableObject {
         guard isFinishing else { return }
         isFinishing = false; finishTask?.cancel(); stopAudio(); ending = true
         status = transcript.isEmpty ? "No speech heard" : "Finishing your command…"
-        enqueue(final: true)
+        evaluate(final: true)
     }
 
     func cancel() {
@@ -428,12 +363,11 @@ final class Assistant: ObservableObject {
     func runTyped() {
         guard ready, !typedCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let text = typedCommand
-        resetSession(); transcript = text; ending = true; status = "Checking command…"; enqueue(final: true)
+        resetSession(); transcript = text; ending = true; status = "Checking command…"; evaluate(final: true)
     }
 
     func shutdown() {
-        workerStopped = true; stopAudio(); output?.readabilityHandler = nil
-        try? input?.close(); worker?.terminate()
+        planTask?.cancel(); stopAudio()
     }
 }
 
