@@ -47,13 +47,37 @@ def candidate(text, final=False, completed=()):
 
 class Engine:
     def __init__(self):
-        pass
+        self.planner = None
+
+    def load(self):
+        """Warms up the local AI planner so the first command is fast."""
+        if self.planner is None:
+            from planner import Planner
+            planner = Planner()
+            description = planner.warm()
+            self.planner = planner
+            return description
+        return 'ready'
 
     def decide(self, request):
         started = time.perf_counter()
+        if request.get('engine') == 'ai' and request.get('final'):
+            return self.plan(request, started)
         decision = candidate(request['text'], request.get('final', False), request.get('completed', []))
         result = {**decision, 'id': request['id'], 'text': request['text'], 'final': request.get('final', False), 'engine': request.get('engine', 'exact')}
         result['ms'] = round((time.perf_counter() - started) * 1000)
+        return result
+
+    def plan(self, request, started):
+        text = request['text']
+        cancelled = candidate(text, True)
+        if cancelled['action'] == 'cancel':
+            result = cancelled
+        else:
+            self.load()
+            result = {'action': 'plan', **self.planner.plan(text[:2000])}
+        result.update(id=request['id'], text=text, final=True, engine='ai',
+                      ms=round((time.perf_counter() - started) * 1000))
         return result
 
 
@@ -63,7 +87,7 @@ def main():
         try:
             request = json.loads(line)
             if request.get('type') == 'load':
-                result = {'type': 'ready', 'device': 'grammar'}
+                result = {'type': 'ready', 'device': engine.load()}
             else:
                 result = engine.decide(request)
         except Exception as error:
