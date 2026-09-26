@@ -89,11 +89,13 @@ final class Assistant: ObservableObject {
         output?.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { handle.readabilityHandler = nil; return }
-            Task { @MainActor in self?.receive(data) }
+            guard let self else { return }
+            Task { @MainActor in self.receive(data) }
         }
         process.terminationHandler = { [weak self] _ in
+            guard let self else { return }
             Task { @MainActor in
-                guard let self, !self.workerStopped else { return }
+                guard !self.workerStopped else { return }
                 self.ready = false; self.busy = false; self.inFlight = nil
                 self.modelStatus = "Engine stopped — reopen Utter"
                 self.status = "Local engine stopped. See ~/Library/Logs/Utter/engine.log"
