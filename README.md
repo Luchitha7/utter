@@ -24,7 +24,7 @@ Press **⌘⇧Space**, speak, and Utter does it:
 | “Write hello in notes” · “Open Notes and write buy milk” · “Jot down call the plumber” | Creates the note with your exact words |
 | “Remind me to call mum at 5” · “Remind me tomorrow morning at 9” · “Remind me in 20 minutes” | Adds a reminder with an alert. Times are worked out in code: “at 5” means the next 5 o’clock, and a time that has already passed moves to tomorrow |
 | “Run my Water Eject shortcut” | Runs one of your Apple Shortcuts |
-| “Search for pasta recipes” · “Go to youtube.com” | Opens it in your browser |
+| “Search for pasta recipes” · “Search YouTube for lofi music” · “Open Chrome, open a new tab and search YouTube” · “Go to youtube.com in Safari” | Searches the web, YouTube, Wikipedia or Amazon, or opens a site, in a new tab of the browser you name (or your default) |
 | “Set volume to 30” · “Mute” | Changes the volume |
 | “Open Safari… actually Chrome” | Acts on what you meant |
 
