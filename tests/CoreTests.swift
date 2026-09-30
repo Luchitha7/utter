@@ -96,6 +96,42 @@ struct CoreTests {
             expect(apps.resolve("broken") == nil, "empty .app folder is skipped")
         }
 
+        // MARK: Due dates
+
+        await test("due dates: worked out in code from what was said") {
+            func at(_ day: Int, _ hour: Int, _ minute: Int) -> Date {
+                Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: day, hour: hour, minute: minute))!
+            }
+            let evening = at(30, 19, 42), morning = at(30, 8, 10), lateNight = at(30, 23, 55)  // Wednesday
+            let cases: [(String, Date, String?)] = [
+                ("remind me to call mum at 5", evening, "2026-10-01T05:00"),
+                ("remind me to call mum at 5", morning, "2026-09-30T17:00"),
+                ("remind me to call mum at 5", lateNight, "2026-10-01T05:00"),
+                ("remind me at 9", morning, "2026-09-30T09:00"),
+                ("remind me tomorrow morning at 9 to submit the report", evening, "2026-10-01T09:00"),
+                ("remind me tomorrow at 9", lateNight, "2026-10-01T09:00"),
+                ("remind me tomorrow at 5", morning, "2026-10-01T17:00"),
+                ("remind me at 5pm to stretch", evening, "2026-10-01T17:00"),
+                ("remind me at 9 pm to stretch", evening, "2026-09-30T21:00"),
+                ("remind me at 7:15 am", evening, "2026-10-01T07:15"),
+                ("remind me at 21:30 to call dad", evening, "2026-09-30T21:30"),
+                ("remind me at noon tomorrow", evening, "2026-10-01T12:00"),
+                ("remind me this evening at 8", evening, "2026-09-30T20:00"),
+                ("remind me tonight to lock the door", evening, "2026-09-30T20:00"),
+                ("remind me on friday at 3 to pay rent", evening, "2026-10-02T15:00"),
+                ("remind me next monday to call the bank", evening, "2026-10-05T09:00"),
+                ("remind me in 20 minutes to check the oven", evening, "2026-09-30T20:02"),
+                ("remind me in an hour", evening, "2026-09-30T20:42"),
+                ("remind me in half an hour", evening, "2026-09-30T20:12"),
+                ("remind me in 10 minutes", lateNight, "2026-10-01T00:05"),
+                ("remind me in two hours to move the car", evening, "2026-09-30T21:42"),
+                ("remind me to buy milk", evening, nil),
+            ]
+            for (said, now, expected) in cases {
+                expectEqual(DueDate.resolve(said, now: now).map(DueDate.format), expected, "\(said) @ \(DueDate.format(now))")
+            }
+        }
+
         // MARK: Planner
 
         await test("planner: multi-step plan") {
@@ -123,11 +159,12 @@ struct CoreTests {
                                      .openURL("https://www.google.com/search?q=weather+in+colombo", label: "Search the web for weather in colombo")])
         }
 
-        await test("planner: reminder due dates are validated") {
-            let good = try await planner([call("create_reminder", ["title": "call mum", "due": "2026-09-26T17:00"])]).plan("x")
-            let bad = try await planner([call("create_reminder", ["title": "call mum", "due": "five pm"])]).plan("x")
-            expectEqual(good.steps, [.createReminder(title: "call mum", due: "2026-09-26T17:00")])
-            expectEqual(bad.steps, [.createReminder(title: "call mum", due: nil)])
+        await test("planner: reminder time comes from the transcript, not the model") {
+            let now = Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: 30, hour: 19, minute: 42))!
+            let wrong = try await planner([call("create_reminder", ["title": "call mum", "due": "2026-09-30T20:00"])]).plan("remind me to call mum at 5", now: now)
+            expectEqual(wrong.steps, [.createReminder(title: "call mum", due: "2026-10-01T05:00")])
+            let none = try await planner([call("create_reminder", ["title": "buy milk", "due": "2026-09-30T20:00"])]).plan("remind me to buy milk", now: now)
+            expectEqual(none.steps, [.createReminder(title: "buy milk", due: nil)])
         }
 
         await test("planner: replies without tools") {

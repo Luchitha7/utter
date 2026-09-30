@@ -22,7 +22,7 @@ Press **⌘⇧Space**, speak, and Utter does it:
 | “Could you pull up Chrome” | Opens any installed app |
 | “Open WhatsApp and then Calculator” | Runs several steps in order |
 | “Open Notes and create a note saying buy milk and bread” | Creates the note, word for word |
-| “Remind me to call mum at 5” | Adds a reminder for 5:00 pm with an alert |
+| “Remind me to call mum at 5” · “Remind me tomorrow morning at 9” · “Remind me in 20 minutes” | Adds a reminder with an alert. Times are worked out in code: “at 5” means the next 5 o’clock, and a time that has already passed moves to tomorrow |
 | “Run my Water Eject shortcut” | Runs one of your Apple Shortcuts |
 | “Search for pasta recipes” · “Go to youtube.com” | Opens it in your browser |
 | “Set volume to 30” · “Mute” | Changes the volume |
