@@ -56,9 +56,8 @@ final class Planner {
          ["name": ["type": "string", "description": "Application name as the user said it, e.g. \"Spotify\"."]], ["name"]),
         ("create_note", "Create a note in Apple Notes.",
          ["body": ["type": "string", "description": "The note text, copied exactly from the user's words."]], ["body"]),
-        ("create_reminder", "Create a reminder in Apple Reminders, optionally with a due date and time.",
-         ["title": ["type": "string", "description": "What to be reminded about, in the user's words."],
-          "due": ["type": "string", "description": "Optional local due time as YYYY-MM-DDTHH:MM."]], ["title"]),
+        ("create_reminder", "Create a reminder in Apple Reminders. The app works out the due time itself from what the user said.",
+         ["title": ["type": "string", "description": "What to be reminded about, in the user's words, without the time."]], ["title"]),
         ("run_shortcut", "Run one of the user's Apple Shortcuts by name.",
          ["name": ["type": "string", "description": "Exact shortcut name from the available list."],
           "input": ["type": "string", "description": "Optional text to pass to the shortcut."]], ["name"]),
@@ -79,7 +78,6 @@ final class Planner {
     - If the user corrects themselves ("open Safari, actually Chrome"), act only on their final intent.
     - For notes and reminders, copy the user's own words exactly. Do not rephrase, summarise or add anything.
     - If the user asks to open an app, call open_app for it, even when a later step uses that app.
-    - Resolve relative dates and times ("tomorrow", "at 5") from the current local time you are given. "At 5" means 5:00 exactly, never the current minutes. A time with no am/pm means its next occurrence.
     - If the request is a question, conversation, or something no tool can do, call no tools and reply to the user in one short friendly sentence. Never mention tools.
     - Only use shortcut names from this list:
     """
@@ -115,11 +113,9 @@ final class Planner {
     }
 
     func plan(_ text: String, now: Date = Date()) async throws -> Plan {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "EEEE yyyy-MM-dd HH:mm"
         let messages: [[String: Any]] = [
             ["role": "system", "content": Self.systemPrompt + (shortcuts.isEmpty ? "(none)" : shortcuts.map { "\"\($0)\"" }.joined(separator: ", "))],
-            ["role": "user", "content": "Current local time: \(formatter.string(from: now)).\nCommand: \(text)"],
+            ["role": "user", "content": "Command: \(text)"],
         ]
         let message = try await (chatOverride ?? ollamaChat)(messages)
         var steps: [Step] = [], problems: [String] = []
@@ -129,7 +125,7 @@ final class Planner {
             if let json = function["arguments"] as? String, let data = json.data(using: .utf8) {
                 arguments = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
             }
-            switch validate(function["name"] as? String ?? "", arguments, text: text) {
+            switch validate(function["name"] as? String ?? "", arguments, text: text, now: now) {
             case .step(let step) where !steps.contains { $0.key == step.key }: steps.append(step)
             case .refused(let reason): problems.append(reason)
             default: break
@@ -152,7 +148,7 @@ final class Planner {
 
     enum Validation: Equatable { case step(Step), refused(String), skipped }
 
-    func validate(_ tool: String, _ arguments: [String: Any], text: String) -> Validation {
+    func validate(_ tool: String, _ arguments: [String: Any], text: String, now: Date = Date()) -> Validation {
         func string(_ name: String, limit: Int = 4000) -> String? {
             guard let value = (arguments[name] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
             return String(value.prefix(limit))
@@ -167,7 +163,8 @@ final class Planner {
             return .step(.createNote(body: body))
         case "create_reminder":
             guard let title = string("title", limit: 500) else { return .skipped }
-            return .step(.createReminder(title: title, due: string("due", limit: 40).flatMap(Self.normalizeDue)))
+            // The due time is worked out from the transcript; the model is unreliable at date arithmetic.
+            return .step(.createReminder(title: title, due: DueDate.resolve(text, now: now).map(DueDate.format)))
         case "run_shortcut":
             let name = string("name", limit: 200) ?? ""
             guard let match = shortcuts.first(where: { $0.lowercased() == name.lowercased() }) else {
@@ -224,19 +221,6 @@ final class Planner {
         guard !wanted.isEmpty, wanted.count <= said.count else { return nil }
         for start in 0...(said.count - wanted.count) where said[start..<(start + wanted.count)].map(\.word) == wanted {
             return String(text[said[start].range.lowerBound..<said[start + wanted.count - 1].range.upperBound])
-        }
-        return nil
-    }
-
-    static func normalizeDue(_ due: String) -> String? {
-        let parser = DateFormatter()
-        parser.locale = Locale(identifier: "en_US_POSIX")
-        for format in ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"] {
-            parser.dateFormat = format
-            if let date = parser.date(from: due) {
-                parser.dateFormat = "yyyy-MM-dd'T'HH:mm"
-                return parser.string(from: date)
-            }
         }
         return nil
     }

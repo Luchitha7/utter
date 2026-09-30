@@ -159,11 +159,12 @@ struct CoreTests {
                                      .openURL("https://www.google.com/search?q=weather+in+colombo", label: "Search the web for weather in colombo")])
         }
 
-        await test("planner: reminder due dates are validated") {
-            let good = try await planner([call("create_reminder", ["title": "call mum", "due": "2026-09-26T17:00"])]).plan("x")
-            let bad = try await planner([call("create_reminder", ["title": "call mum", "due": "five pm"])]).plan("x")
-            expectEqual(good.steps, [.createReminder(title: "call mum", due: "2026-09-26T17:00")])
-            expectEqual(bad.steps, [.createReminder(title: "call mum", due: nil)])
+        await test("planner: reminder time comes from the transcript, not the model") {
+            let now = Calendar.current.date(from: DateComponents(year: 2026, month: 9, day: 30, hour: 19, minute: 42))!
+            let wrong = try await planner([call("create_reminder", ["title": "call mum", "due": "2026-09-30T20:00"])]).plan("remind me to call mum at 5", now: now)
+            expectEqual(wrong.steps, [.createReminder(title: "call mum", due: "2026-10-01T05:00")])
+            let none = try await planner([call("create_reminder", ["title": "buy milk", "due": "2026-09-30T20:00"])]).plan("remind me to buy milk", now: now)
+            expectEqual(none.steps, [.createReminder(title: "buy milk", due: nil)])
         }
 
         await test("planner: replies without tools") {
