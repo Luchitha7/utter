@@ -76,6 +76,15 @@ struct CoreTests {
             expectEqual(Grammar.decide("open notes", completed: ["open:com.apple.Notes"]).key, nil)
         }
 
+        await test("grammar: AI mode never acts on a half-finished sentence") {
+            let partials = ["open", "open safari", "open safari actually", "open safari actually chrome"]
+            for text in partials {
+                if case .open = Grammar.decideWhileSpeaking(text, aiMode: true).action { expect(false, "opened early on: \(text)") }
+            }
+            expectEqual(Grammar.decideWhileSpeaking("open safari never mind", aiMode: true).action, .cancel)
+            expectEqual(Grammar.decideWhileSpeaking("open safari", aiMode: false).key, "open:com.apple.Safari")
+        }
+
         // MARK: App catalog
 
         await test("apps: spoken names resolve") {
@@ -128,6 +137,28 @@ struct CoreTests {
             expectEqual(try await robotic.plan("don't open spotify").say, "OK, I won’t do anything.")
             let fallback = try await robotic.plan("what is the capital of france").say
             expect(fallback.contains("reminders"), "fallback reply")
+        }
+
+        await test("planner: note text comes from the transcript, not the model") {
+            let cases: [(said: String, proposed: String, saved: String)] = [
+                ("jot down buy milk and eggs", "Buy milk and eggs.", "buy milk and eggs"),
+                ("open notes and write down call the dentist", "Call dentist", "call the dentist"),
+                ("take a note that the meeting moved to 3", "Meeting moved to 3pm.", "the meeting moved to 3"),
+                ("make a note: pay rent on Friday", "Pay rent Friday", "pay rent on Friday"),
+                ("add buy oat milk to my shopping note", "Buy oat milk.", "buy oat milk"),
+                ("add call the plumber to my notes", "add call the plumber to my notes", "call the plumber"),
+                ("please add pick up the parcel to the note", "Pick up parcel", "pick up the parcel"),
+                ("put Sam's birthday is on Friday in my notes", "Sam’s birthday is on Friday", "Sam's birthday is on Friday"),
+            ]
+            for (said, proposed, saved) in cases {
+                let plan = try await planner([call("create_note", ["body": proposed])]).plan(said)
+                expectEqual(plan.steps.filter { $0.key == "note" }, [.createNote(body: saved)], said)
+            }
+        }
+
+        await test("planner: a reworded note with no trigger phrase keeps the model's text") {
+            let plan = try await planner([call("create_note", ["body": "Sam birthday Friday"])]).plan("remember in notes that it's Sam's birthday this Friday")
+            expectEqual(plan.steps, [.createNote(body: "Sam birthday Friday")])
         }
 
         await test("planner: explicit open Notes is kept") {

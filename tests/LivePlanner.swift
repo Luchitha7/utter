@@ -18,6 +18,8 @@ let cases: [(String, [String])] = [
     ("don't open safari", []),
     ("what is the capital of france", []),
     ("open whatsapp and then calculator", ["open_app", "open_app"]),
+    ("jot down buy milk and eggs", ["create_note"]),
+    ("add call the plumber to my notes", ["create_note"]),
 ]
 
 func tool(_ step: Step) -> String {
