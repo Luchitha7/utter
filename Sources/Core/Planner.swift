@@ -86,7 +86,8 @@ final class Planner {
     static let openNotes = Pattern(#"\b(?:open|launch|start)\s+(?:the\s+)?notes\b"#)
     static let negation = Pattern(#"\b(?:don[’']?t|do not|never mind|nevermind|cancel|stop)\b"#)
     static let toolTalk = Pattern(#"\btools?\b|function"#)
-    static let addToNote = Pattern(#"^(?:please\s+)?add\s+(.+?)\s+to\s+(?:my|the|a)\s+(?:[\p{L}\p{N}]+\s+)?notes?[.!]?$"#, dotAll: true)
+    static let addToNote = Pattern(#"^(?:please\s+)?(?:add|put|write|save|type)\s+(.+?)\s+(?:to|in|on|into)\s+(?:(?:my|the|a)\s+)?(?:[\p{L}\p{N}]+\s+)?notes?(?:\s+app)?[.!]?$"#, dotAll: true)
+    static let notesThenWrite = Pattern(#"\bnotes?(?:\s+app)?\s*,?\s+(?:and|then)\s+(?:then\s+)?(?:please\s+)?(?:write|type|put|add)\s+(.+)$"#, dotAll: true)
     static let noteBody = Pattern(#"\b(?:note\s+(?:saying|that says|with the text)|(?:jot|write)\s+down(?:\s+that)?|(?:take|make)\s+a\s+note(?:\s+(?:that|saying|of))?)\s*[:,]?\s+(.+)$"#, dotAll: true)
 
     let model: String
@@ -130,6 +131,11 @@ final class Planner {
             case .refused(let reason): problems.append(reason)
             default: break
             }
+        }
+        // The model sometimes drops the note in "open Notes and write X"; the user clearly asked for one.
+        if !steps.contains(where: { $0.key == "note" }), Self.notesThenWrite.contains(text),
+           case .step(let note) = validate("create_note", [:], text: text, now: now) {
+            steps.append(note)
         }
         // The model sometimes folds "open Notes" into create_note; keep the explicit open the user asked for.
         if steps.contains(where: { if case .createNote = $0 { return true }; return false }), Self.openNotes.contains(text),
@@ -195,11 +201,12 @@ final class Planner {
     }
 
     /// The note text to save, taken from what the user said wherever possible:
-    /// 1. the words after a trigger phrase ("note saying…", "jot down…", "take a note that…"), or the X in "add X to my notes";
+    /// 1. the words after a trigger phrase ("note saying…", "jot down…", "take a note that…"), the X in "put X in my notes",
+    ///    or the X in "open Notes and write X";
     /// 2. otherwise the model's text, if it appears in the transcript, copied from the transcript;
     /// 3. otherwise the model's text as a last resort.
     static func noteText(said: String, proposed: String?) -> String? {
-        if let match = addToNote.firstMatch(in: said) ?? noteBody.firstMatch(in: said) {
+        if let match = addToNote.firstMatch(in: said) ?? noteBody.firstMatch(in: said) ?? notesThenWrite.firstMatch(in: said) {
             let body = match.group(1).trimmingCharacters(in: .whitespacesAndNewlines)
             if !body.isEmpty { return body }
         }

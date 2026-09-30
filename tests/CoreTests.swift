@@ -185,6 +185,10 @@ struct CoreTests {
                 ("add buy oat milk to my shopping note", "Buy oat milk.", "buy oat milk"),
                 ("add call the plumber to my notes", "add call the plumber to my notes", "call the plumber"),
                 ("please add pick up the parcel to the note", "Pick up parcel", "pick up the parcel"),
+                ("put hello in notes", "put hello in notes", "hello"),
+                ("write hello on notes", "Hello", "hello"),
+                ("save buy milk to my notes", "Buy milk", "buy milk"),
+                ("type meeting at ten into the note", "Meeting at 10", "meeting at ten"),
                 ("put Sam's birthday is on Friday in my notes", "Sam’s birthday is on Friday", "Sam's birthday is on Friday"),
             ]
             for (said, proposed, saved) in cases {
@@ -196,6 +200,17 @@ struct CoreTests {
         await test("planner: a reworded note with no trigger phrase keeps the model's text") {
             let plan = try await planner([call("create_note", ["body": "Sam birthday Friday"])]).plan("remember in notes that it's Sam's birthday this Friday")
             expectEqual(plan.steps, [.createNote(body: "Sam birthday Friday")])
+        }
+
+        await test("planner: \"open notes and write X\" writes the note even if the model drops it") {
+            for (said, body) in [("open notes and write hello", "hello"), ("open the notes app then type buy eggs", "buy eggs"),
+                                 ("open notes, and put call mum", "call mum")] {
+                let plan = try await planner([call("open_app", ["name": "Notes"])]).plan(said)
+                expectEqual(plan.steps.map(\.key), ["open:test.notes", "note"], said)
+                expectEqual(plan.steps.last, .createNote(body: body), said)
+            }
+            let justOpen = try await planner([call("open_app", ["name": "Notes"])]).plan("open notes")
+            expectEqual(justOpen.steps.map(\.key), ["open:test.notes"])
         }
 
         await test("planner: explicit open Notes is kept") {
