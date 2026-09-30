@@ -21,10 +21,10 @@ Press **⌘⇧Space**, speak, and Utter does it:
 |---|---|
 | “Could you pull up Chrome” | Opens any installed app |
 | “Open WhatsApp and then Calculator” | Runs several steps in order |
-| “Open Notes and create a note saying buy milk and bread” | Creates the note, word for word |
+| “Write hello in notes” · “Open Notes and write buy milk” · “Jot down call the plumber” | Creates the note with your exact words |
 | “Remind me to call mum at 5” · “Remind me tomorrow morning at 9” · “Remind me in 20 minutes” | Adds a reminder with an alert. Times are worked out in code: “at 5” means the next 5 o’clock, and a time that has already passed moves to tomorrow |
 | “Run my Water Eject shortcut” | Runs one of your Apple Shortcuts |
-| “Search for pasta recipes” · “Go to youtube.com” | Opens it in your browser |
+| “Search for pasta recipes” · “Search YouTube for lofi music” · “Open Chrome, open a new tab and search YouTube” · “Go to youtube.com in Safari” | Searches the web, YouTube, Wikipedia or Amazon, or opens a site, in a new tab of the browser you name (or your default) |
 | “Set volume to 30” · “Mute” | Changes the volume |
 | “Open Safari… actually Chrome” | Acts on what you meant |
 
@@ -58,11 +58,11 @@ On first use, macOS asks for permission to use the **microphone** and **speech r
 
 1. Press **⌘⇧Space** from any app, or click **Start listening**.
 2. Say a command.
-3. Press **⌘⇧Space** again, or click **Finish command**.
+3. Pause. Utter runs the command after about 1.5 seconds of silence. Press **⌘⇧Space** again or click **Finish now** to run it sooner.
 
 Nothing runs until you finish, so you can change your mind mid-sentence (“open Safari… actually, Chrome”). In **Exact commands** mode, simple commands such as “open Safari” start while you're still speaking.
 
-You can also type a command and press **Run**. **Preview only** shows the planned steps without doing anything. **Exact commands** skips the AI and accepts only fixed phrases (“open Safari”, “create a note saying …”), which is useful when Ollama isn't running.
+You can also type a command and press **Run**. **Preview only** shows the planned steps without doing anything. **Exact commands** skips the AI and accepts only fixed phrases (“open Safari”, “create a note saying …”). If Ollama isn't running, Utter shows an orange banner, switches to Exact commands, and switches back by itself once Ollama starts.
 
 ## How it works
 
@@ -93,7 +93,7 @@ Everything is plain Swift with no third-party dependencies.
 
 - The model can only pick from a fixed set of actions. It can't run shell commands, delete files or send messages.
 - Apps must actually be installed, shortcuts must exist by exact name, and URLs must be `http` or `https`. Anything else is refused with a message.
-- Note text comes from your own words: after “note saying…”, “jot down…” or “take a note that…”, or wherever the model's version appears in what you said. It's passed as data and never inserted into scripts.
+- Note text comes from your own words: after “note saying…”, “jot down…” or “take a note that…”, the X in “put X in my notes” or “open Notes and write X”, or wherever the model's version appears in what you said. It's passed as data and never inserted into scripts.
 - Cancel stops pending steps. It doesn't undo an app that's already open or a note that's already been created.
 
 ## Development
@@ -111,6 +111,12 @@ defaults write io.github.luchitha7.utter OllamaModel qwen3:4b-instruct
 defaults write io.github.luchitha7.utter OllamaURL http://127.0.0.1:11434
 ```
 
+To change how long a pause ends a command (default 1.5 seconds):
+
+```sh
+defaults write io.github.luchitha7.utter SilenceSeconds -float 2
+```
+
 ### Adding a tool
 
 1. Add a case to `Step`, describe the tool in `Planner.tools`, and validate its arguments in `Planner.validate` ([`Sources/Core/Planner.swift`](Sources/Core/Planner.swift)).
@@ -121,6 +127,7 @@ defaults write io.github.luchitha7.utter OllamaURL http://127.0.0.1:11434
 
 - English (US) speech only.
 - No wake word. You start listening with the hotkey or button.
+- A pause of more than about 1.5 seconds mid-sentence ends the command early. Raise `SilenceSeconds` if that happens to you.
 - In Exact commands mode, an app that opens while you're still speaking stays open even if you then correct yourself.
 - Only the actions listed above are supported. Utter doesn't understand what's on screen.
 

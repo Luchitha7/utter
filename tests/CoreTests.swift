@@ -30,7 +30,7 @@ struct CoreTests {
     @MainActor static func main() async {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("utter-tests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
-        for name in ["Notes", "Safari", "Google Chrome", "Spotify", "System Settings", "zoom.us", "Visual Studio Code"] {
+        for name in ["Notes", "Safari", "Google Chrome", "Spotify", "System Settings", "zoom.us", "Visual Studio Code", "Brave Browser"] {
             let contents = root.appendingPathComponent("\(name).app/Contents")
             try! FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
             let plist = try! PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "test." + name.lowercased()], format: .xml, options: 0)
@@ -85,6 +85,29 @@ struct CoreTests {
             expectEqual(Grammar.decideWhileSpeaking("open safari", aiMode: false).key, "open:com.apple.Safari")
         }
 
+        // MARK: Web searches
+
+        await test("search intent: site, query and browser come from what was said") {
+            let cases: [(String, SearchIntent?)] = [
+                ("open chrome and open a new taba and search Youtube", SearchIntent(site: .youtube, query: nil)),
+                ("search youtube for lofi music", SearchIntent(site: .youtube, query: "lofi music")),
+                ("search for cats on youtube", SearchIntent(site: .youtube, query: "cats")),
+                ("search cats on youtube in chrome", SearchIntent(site: .youtube, query: "cats")),
+                ("search wikipedia for alan turing", SearchIntent(site: .wikipedia, query: "alan turing")),
+                ("search amazon for usb c cable", SearchIntent(site: .amazon, query: "usb c cable")),
+                ("search the web for pasta recipes", SearchIntent(site: nil, query: "pasta recipes")),
+                ("open safari and search for weather in colombo", SearchIntent(site: nil, query: "weather in colombo")),
+                ("google best laptops in safari", SearchIntent(site: nil, query: "best laptops")),
+                ("look up the weather in colombo", SearchIntent(site: nil, query: "the weather in colombo")),
+                ("open youtube", nil),
+                ("go to youtube.com", nil),
+            ]
+            for (said, expected) in cases { expectEqual(SearchIntent.parse(said), expected, said) }
+            expectEqual(SearchIntent(site: .youtube, query: nil).url, "https://www.youtube.com")
+            expectEqual(SearchIntent(site: .youtube, query: "lofi music").url, "https://www.youtube.com/results?search_query=lofi+music")
+            expectEqual(SearchIntent(site: nil, query: "c++ & rust").url, "https://www.google.com/search?q=c%2B%2B+%26+rust")
+        }
+
         // MARK: App catalog
 
         await test("apps: spoken names resolve") {
@@ -94,6 +117,20 @@ struct CoreTests {
             }
             expect(apps.resolve("photoshop") == nil, "unknown app")
             expect(apps.resolve("broken") == nil, "empty .app folder is skipped")
+        }
+
+        // MARK: End of speech
+
+        await test("end of speech: finishes after a pause, gives up on silence") {
+            let start = Date(timeIntervalSinceReferenceDate: 0)
+            let endpointer = Endpointer(silence: 1.5, noSpeechTimeout: 8)
+            func at(_ seconds: TimeInterval) -> Date { start.addingTimeInterval(seconds) }
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: nil, now: at(3)), .listen, "quiet but still waiting")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: nil, now: at(8.1)), .noSpeech, "nothing said")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: at(2), now: at(3)), .listen, "short pause")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: at(2), now: at(3.6)), .finish, "stopped talking")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: at(9), now: at(10)), .listen, "long command still going")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: at(9), now: at(10.6)), .finish, "long command done")
         }
 
         // MARK: Due dates
@@ -146,7 +183,7 @@ struct CoreTests {
 
         await test("planner: rejects unknown apps, shortcuts, tools and URLs") {
             let plan = try await planner([call("open_app", ["name": "Photoshop"]), call("run_shortcut", ["name": "Delete Everything"]),
-                                          call("shell", ["command": "rm -rf ~"]), call("open_url", ["url": "javascript:alert(1)"])]).plan("x")
+                                          call("shell", ["command": "rm -rf ~"]), call("open_url", ["url": "javascript:alert(1)"])]).plan("run my delete everything shortcut")
             expectEqual(plan.steps, [])
             expect(plan.say.contains("Photoshop") && plan.say.contains("Delete Everything"), plan.say)
         }
@@ -155,8 +192,8 @@ struct CoreTests {
             let plan = try await planner([call("run_shortcut", ["name": "water eject"]), call("set_volume", ["percent": 150]),
                                           call("open_url", ["url": "youtube.com"]), call("web_search", ["query": "weather in colombo"])]).plan("x")
             expectEqual(plan.steps, [.runShortcut(name: "Water Eject", input: nil), .setVolume(100),
-                                     .openURL("https://youtube.com", label: "Open youtube.com"),
-                                     .openURL("https://www.google.com/search?q=weather+in+colombo", label: "Search the web for weather in colombo")])
+                                     .openURL("https://youtube.com", label: "Open youtube.com", browser: nil),
+                                     .openURL("https://www.google.com/search?q=weather+in+colombo", label: "Search the web for weather in colombo", browser: nil)])
         }
 
         await test("planner: reminder time comes from the transcript, not the model") {
@@ -185,6 +222,10 @@ struct CoreTests {
                 ("add buy oat milk to my shopping note", "Buy oat milk.", "buy oat milk"),
                 ("add call the plumber to my notes", "add call the plumber to my notes", "call the plumber"),
                 ("please add pick up the parcel to the note", "Pick up parcel", "pick up the parcel"),
+                ("put hello in notes", "put hello in notes", "hello"),
+                ("write hello on notes", "Hello", "hello"),
+                ("save buy milk to my notes", "Buy milk", "buy milk"),
+                ("type meeting at ten into the note", "Meeting at 10", "meeting at ten"),
                 ("put Sam's birthday is on Friday in my notes", "Sam’s birthday is on Friday", "Sam's birthday is on Friday"),
             ]
             for (said, proposed, saved) in cases {
@@ -196,6 +237,51 @@ struct CoreTests {
         await test("planner: a reworded note with no trigger phrase keeps the model's text") {
             let plan = try await planner([call("create_note", ["body": "Sam birthday Friday"])]).plan("remember in notes that it's Sam's birthday this Friday")
             expectEqual(plan.steps, [.createNote(body: "Sam birthday Friday")])
+        }
+
+        await test("planner: \"open notes and write X\" writes the note even if the model drops it") {
+            for (said, body) in [("open notes and write hello", "hello"), ("open the notes app then type buy eggs", "buy eggs"),
+                                 ("open notes, and put call mum", "call mum")] {
+                let plan = try await planner([call("open_app", ["name": "Notes"])]).plan(said)
+                expectEqual(plan.steps.map(\.key), ["open:test.notes", "note"], said)
+                expectEqual(plan.steps.last, .createNote(body: body), said)
+            }
+            let justOpen = try await planner([call("open_app", ["name": "Notes"])]).plan("open notes")
+            expectEqual(justOpen.steps.map(\.key), ["open:test.notes"])
+        }
+
+        await test("planner: \"open Chrome, new tab, search YouTube\" opens YouTube in Chrome") {
+            let chrome = apps.resolve("chrome")!.path
+            for calls in [[call("open_app", ["name": "Google Chrome"])],
+                          [call("open_app", ["name": "Google Chrome"]), call("run_shortcut", ["name": "Open New Tab and Search Youtube"])],
+                          [call("open_app", ["name": "Google Chrome"]), call("web_search", ["query": "youtube"])]] {
+                let plan = try await planner(calls).plan("open chrome and open a new taba and search Youtube")
+                expectEqual(plan.steps.last, .openURL("https://www.youtube.com", label: "Open YouTube in Google Chrome", browser: chrome))
+                expectEqual(plan.steps.count, 2)
+                expectEqual(plan.say, "", "no made-up shortcut message")
+            }
+        }
+
+        await test("planner: site searches and the browser you name") {
+            let safari = apps.resolve("safari")!.path, brave = apps.resolve("brave")!.path
+            let youtube = try await planner([call("web_search", ["query": "lofi music"])]).plan("search youtube for lofi music")
+            expectEqual(youtube.steps, [.openURL("https://www.youtube.com/results?search_query=lofi+music", label: "Search YouTube for lofi music", browser: nil)])
+            let inSafari = try await planner([call("web_search", ["query": "cats"])]).plan("search cats on youtube in safari")
+            expectEqual(inSafari.steps, [.openURL("https://www.youtube.com/results?search_query=cats", label: "Search YouTube for cats in Safari", browser: safari)])
+            let openedFirst = try await planner([call("open_app", ["name": "Brave"]), call("web_search", ["query": "cats"])]).plan("open brave and search for cats")
+            expectEqual(openedFirst.steps.last, .openURL("https://www.google.com/search?q=cats", label: "Search the web for cats in Brave Browser", browser: brave))
+            let site = try await planner([call("open_url", ["url": "youtube.com"])]).plan("open youtube in safari")
+            expectEqual(site.steps, [.openURL("https://youtube.com", label: "Open youtube.com in Safari", browser: safari)])
+            let plain = try await planner([call("web_search", ["query": "pasta recipes"])]).plan("search the web for pasta recipes")
+            expectEqual(plain.steps, [.openURL("https://www.google.com/search?q=pasta+recipes", label: "Search the web for pasta recipes", browser: nil)])
+        }
+
+        await test("planner: made-up shortcuts are ignored unless a shortcut was asked for") {
+            let silent = try await planner([call("run_shortcut", ["name": "Tidy Desktop"])]).plan("tidy my desktop")
+            expectEqual(silent.steps, [])
+            expect(!silent.say.contains("shortcut called"), silent.say)
+            let asked = try await planner([call("run_shortcut", ["name": "Tidy Desktop"])]).plan("run my tidy desktop shortcut")
+            expect(asked.say.contains("Tidy Desktop"), asked.say)
         }
 
         await test("planner: explicit open Notes is kept") {
