@@ -28,7 +28,7 @@ Press **⌘⇧Space**, speak, and Utter does it:
 | “Set volume to 30” · “Mute” | Changes the volume |
 | “Open Safari… actually Chrome” | Acts on what you meant |
 
-Everything runs **on your Mac**. The language model is served by [Ollama](https://ollama.com), and speech recognition uses Apple's on-device recognizer when your Mac supports it. There is no account, no API key and no cloud service.
+Everything runs **on your Mac**. The language model is served by [Ollama](https://ollama.com), and speech recognition uses Apple's on-device recognizer only. If a Mac can't recognise speech on-device, Utter won't listen (typed commands still work). There is no account, no API key and no cloud service.
 
 ## Requirements
 
@@ -60,7 +60,7 @@ On first use, macOS asks for permission to use the **microphone** and **speech r
 2. Say a command.
 3. Press **⌘⇧Space** again, or click **Finish command**.
 
-Simple commands such as “open Safari” can start while you're still speaking. Everything else runs when you finish.
+Nothing runs until you finish, so you can change your mind mid-sentence (“open Safari… actually, Chrome”). In **Exact commands** mode, simple commands such as “open Safari” start while you're still speaking.
 
 You can also type a command and press **Run**. **Preview only** shows the planned steps without doing anything. **Exact commands** skips the AI and accepts only fixed phrases (“open Safari”, “create a note saying …”), which is useful when Ollama isn't running.
 
@@ -93,7 +93,7 @@ Everything is plain Swift with no third-party dependencies.
 
 - The model can only pick from a fixed set of actions. It can't run shell commands, delete files or send messages.
 - Apps must actually be installed, shortcuts must exist by exact name, and URLs must be `http` or `https`. Anything else is refused with a message.
-- Dictated note text is passed as data, never inserted into scripts, and kept exactly as you said it.
+- Note text comes from your own words: after “note saying…”, “jot down…” or “take a note that…”, or wherever the model's version appears in what you said. It's passed as data and never inserted into scripts.
 - Cancel stops pending steps. It doesn't undo an app that's already open or a note that's already been created.
 
 ## Development
@@ -121,7 +121,7 @@ defaults write io.github.luchitha7.utter OllamaURL http://127.0.0.1:11434
 
 - English (US) speech only.
 - No wake word. You start listening with the hotkey or button.
-- An app that opens while you're still speaking stays open even if you then correct yourself.
+- In Exact commands mode, an app that opens while you're still speaking stays open even if you then correct yourself.
 - Only the actions listed above are supported. Utter doesn't understand what's on screen.
 
 ## License
