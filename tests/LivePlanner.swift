@@ -20,6 +20,9 @@ let cases: [(String, [String])] = [
     ("open whatsapp and then calculator", ["open_app", "open_app"]),
     ("jot down buy milk and eggs", ["create_note"]),
     ("add call the plumber to my notes", ["create_note"]),
+    ("write hello on notes", ["create_note"]),
+    ("put hello in notes", ["create_note"]),
+    ("open notes and write hello", ["open_app", "create_note"]),
 ]
 
 func tool(_ step: Step) -> String {
