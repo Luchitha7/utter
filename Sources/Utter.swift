@@ -25,8 +25,12 @@ final class Assistant: ObservableObject {
     @Published var typedCommand = ""
     @Published var busy = false
     @Published var dryRun = false
+    @Published var aiOffline = false
     private let planner: Planner
     private var planTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    /// True when Utter switched itself to Exact commands because Ollama was unreachable.
+    private var switchedToExact = false
     private var recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let audio = AVAudioEngine()
     private var speechRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -85,10 +89,36 @@ final class Assistant: ObservableObject {
             modelStatus = try await planner.warm() + " · on this Mac"
             log("Local AI ready. Nothing leaves your Mac.")
         } catch {
-            modelStatus = "AI unavailable · using Exact commands"
-            if engine == "ai" { engine = "exact" }
-            log(error.localizedDescription); record("AI startup: " + error.localizedDescription)
+            goOffline(error.localizedDescription)
         }
+    }
+
+    /// Switches to Exact commands while Ollama is unreachable, and keeps trying to reconnect.
+    private func goOffline(_ reason: String) {
+        guard !aiOffline else { return }
+        aiOffline = true
+        modelStatus = "AI off · using Exact commands"
+        if engine == "ai" { engine = "exact"; switchedToExact = true }
+        log(reason); record("AI offline: " + reason)
+        reconnectTask?.cancel()
+        reconnectTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled, let description = try? await planner.warm() else { continue }
+                aiOffline = false
+                modelStatus = description + " · on this Mac"
+                if switchedToExact && engine == "exact" { engine = "ai" }
+                switchedToExact = false
+                log("AI is back on. Natural commands work again."); record("AI reconnected")
+                return
+            }
+        }
+    }
+
+    /// The engine picker: a manual choice is never overridden by reconnecting.
+    func choose(engine: String) {
+        self.engine = engine
+        switchedToExact = false
     }
 
     /// Decides what the current transcript asks for. Partial transcripts only use the fixed phrases,
@@ -150,7 +180,12 @@ final class Assistant: ObservableObject {
                 await run(result)
             } catch {
                 guard session == planSession, !Task.isCancelled else { return }
-                fail(error.localizedDescription)
+                if error is URLError {
+                    goOffline("Ollama stopped responding. Switched to Exact commands.")
+                    status = "The AI isn’t running, so that command wasn’t understood. Start Ollama and try again."
+                } else {
+                    fail(error.localizedDescription)
+                }
             }
         }
     }
@@ -401,40 +436,71 @@ struct MainView: View {
     @ObservedObject var assistant: Assistant
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("UTTER").font(.system(size: 11, weight: .bold, design: .monospaced)).tracking(3).foregroundStyle(.secondary)
-                    Text("Say it. Start it.").font(.system(size: 32, weight: .semibold, design: .rounded))
-                }
-                Spacer()
-                Label(assistant.ready ? "On your Mac" : "Warming up", systemImage: assistant.ready ? "desktopcomputer" : "hourglass")
-                    .font(.caption).padding(9).background(.white.opacity(0.07), in: Capsule())
+            header
+            if assistant.aiOffline { offlineBanner }
+            commandCard
+            controls
+            activity
+        }
+        .padding(30).frame(width: 660).background(Color(red: 0.055, green: 0.075, blue: 0.09))
+        .preferredColorScheme(.dark)
+    }
+
+    private var offlineBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("The AI is off, so only fixed phrases like “open Safari” work.").font(.system(size: 12, weight: .semibold))
+                Text("Start Ollama with: brew services start ollama. Utter reconnects by itself.")
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            VStack(alignment: .leading, spacing: 15) {
-                HStack {
-                    Circle().fill(assistant.listening ? Color.mint : Color.gray).frame(width: 8, height: 8)
-                    Text(assistant.status).font(.system(size: 13, weight: .medium)).lineLimit(3)
-                    Spacer()
-                    if assistant.busy { ProgressView().controlSize(.small) }
-                }
-                Text(assistant.transcript.isEmpty ? "“Open Notes and create a note saying buy milk tomorrow.”" : assistant.transcript)
-                    .font(.system(size: 22, weight: .medium, design: .rounded))
-                    .foregroundStyle(assistant.transcript.isEmpty ? .secondary : .primary)
-                    .frame(maxWidth: .infinity, minHeight: 105, alignment: .topLeading)
-                    .textSelection(.enabled)
-                HStack {
-                    Button { assistant.toggle() } label: {
-                        Label(assistant.listening ? "Finish command" : "Start listening", systemImage: assistant.listening ? "stop.fill" : "mic.fill")
-                            .font(.system(size: 14, weight: .semibold)).padding(.horizontal, 12).padding(.vertical, 8)
-                    }
-                    .buttonStyle(.borderedProminent).tint(.mint).disabled(!assistant.ready)
-                    Button("Cancel") { assistant.cancel() }.buttonStyle(.plain).foregroundStyle(.secondary)
-                    Spacer()
-                    Text("⌘ ⇧ Space").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
-                }
-            }.padding(22).background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+        }
+        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var header: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("UTTER").font(.system(size: 11, weight: .bold, design: .monospaced)).tracking(3).foregroundStyle(.secondary)
+                Text("Say it. Start it.").font(.system(size: 32, weight: .semibold, design: .rounded))
+            }
+            Spacer()
+            Label(assistant.ready ? "On your Mac" : "Warming up", systemImage: assistant.ready ? "desktopcomputer" : "hourglass")
+                .font(.caption).padding(9).background(.white.opacity(0.07), in: Capsule())
+        }
+    }
+
+    private var commandCard: some View {
+        VStack(alignment: .leading, spacing: 15) {
             HStack {
-                Picker("Decision engine", selection: $assistant.engine) {
+                Circle().fill(assistant.listening ? Color.mint : Color.gray).frame(width: 8, height: 8)
+                Text(assistant.status).font(.system(size: 13, weight: .medium)).lineLimit(3)
+                Spacer()
+                if assistant.busy { ProgressView().controlSize(.small) }
+            }
+            Text(assistant.transcript.isEmpty ? "“Open Notes and create a note saying buy milk tomorrow.”" : assistant.transcript)
+                .font(.system(size: 22, weight: .medium, design: .rounded))
+                .foregroundStyle(assistant.transcript.isEmpty ? .secondary : .primary)
+                .frame(maxWidth: .infinity, minHeight: 105, alignment: .topLeading)
+                .textSelection(.enabled)
+            HStack {
+                Button { assistant.toggle() } label: {
+                    Label(assistant.listening ? "Finish now" : "Start listening", systemImage: assistant.listening ? "stop.fill" : "mic.fill")
+                        .font(.system(size: 14, weight: .semibold)).padding(.horizontal, 12).padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent).tint(.mint).disabled(!assistant.ready)
+                Button("Cancel") { assistant.cancel() }.buttonStyle(.plain).foregroundStyle(.secondary)
+                Spacer()
+                Text("⌘ ⇧ Space").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+            }
+        }.padding(22).background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+    }
+
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack {
+                Picker("Decision engine", selection: Binding(get: { assistant.engine }, set: { assistant.choose(engine: $0) })) {
                     Text("AI · Qwen, on this Mac").tag("ai")
                     Text("Exact commands").tag("exact")
                 }.frame(width: 290).disabled(assistant.listening || assistant.busy)
@@ -450,6 +516,11 @@ struct MainView: View {
                 Spacer()
                 Text("Last decision: \(assistant.latency)")
             }.font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+        }
+    }
+
+    private var activity: some View {
+        VStack(alignment: .leading, spacing: 22) {
             Divider()
             VStack(alignment: .leading, spacing: 10) {
                 Text("RECENT ACTIVITY").font(.system(size: 10, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(.secondary)
@@ -469,8 +540,6 @@ struct MainView: View {
             Text("\(assistant.speechInfo)\nPress ⌘⇧Space and speak. Utter runs your command when you pause. Try “open Spotify”, “remind me to call mum at 5” or “write hello in notes”.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(4)
         }
-        .padding(30).frame(width: 660).background(Color(red: 0.055, green: 0.075, blue: 0.09))
-        .preferredColorScheme(.dark)
     }
 }
 
