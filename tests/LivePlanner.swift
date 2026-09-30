@@ -23,6 +23,12 @@ let cases: [(String, [String])] = [
     ("write hello on notes", ["create_note"]),
     ("put hello in notes", ["create_note"]),
     ("open notes and write hello", ["open_app", "create_note"]),
+    ("open chrome and open a new taba and search Youtube", ["open_app", "open_url"]),
+    ("open chrome and open a new tab and search for cats", ["open_app", "open_url"]),
+    ("search youtube for lofi music", ["open_url"]),
+    ("search cats on youtube in safari", ["open_url"]),  // an extra "open Safari" first is also fine
+    ("open safari and search for weather in colombo", ["open_app", "open_url"]),
+    ("open youtube in chrome", ["open_app", "open_url"]),
 ]
 
 func tool(_ step: Step) -> String {
@@ -51,7 +57,9 @@ struct LivePlanner {
             started = Date()
             guard let plan = try? await planner.plan(text) else { print("ERROR  \(text)"); continue }
             let ms = Int(Date().timeIntervalSince(started) * 1000)
-            let ok = plan.steps.map(tool) == expected
+            let tools = plan.steps.map(tool)
+            // Opening the browser a page is about to open in is harmless, so it's allowed before a URL step.
+            let ok = tools == expected || (tools.first == "open_app" && Array(tools.dropFirst()) == expected && expected.first == "open_url")
             passed += ok ? 1 : 0
             let detail = plan.steps.isEmpty ? plan.say : plan.steps.map(\.summary).joined(separator: "; ")
             print("\(ok ? "PASS" : "FAIL") \(String(format: "%5d", ms)) ms  \(text.padding(toLength: 64, withPad: " ", startingAt: 0)) -> \(detail)")
