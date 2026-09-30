@@ -39,6 +39,10 @@ final class Assistant: ObservableObject {
     private var starting = false
     private var isFinishing = false
     private var finishTask: Task<Void, Never>?
+    private let endpointer: Endpointer
+    private var endpointTask: Task<Void, Never>?
+    private var listenStartedAt = Date()
+    private var lastWordAt: Date?
     private let logFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Utter/utter.log")
 
     init() {
@@ -49,6 +53,8 @@ final class Assistant: ObservableObject {
         let model = environment["UTTER_MODEL"] ?? defaults.string(forKey: "OllamaModel") ?? "qwen3:4b-instruct"
         let server = environment["UTTER_OLLAMA_URL"] ?? defaults.string(forKey: "OllamaURL") ?? "http://127.0.0.1:11434"
         planner = Planner(model: model, server: URL(string: server) ?? URL(string: "http://127.0.0.1:11434")!)
+        let silence = defaults.double(forKey: "SilenceSeconds")
+        endpointer = Endpointer(silence: silence > 0 ? silence : 1.5)
         ready = true
         Task { await startPlanner() }
     }
@@ -302,7 +308,9 @@ final class Assistant: ObservableObject {
             Task { @MainActor in
                 guard let self, self.session == speechSession, self.listening || self.isFinishing else { return }
                 if let result {
-                    self.transcript = result.bestTranscription.formattedString
+                    let heard = result.bestTranscription.formattedString
+                    if heard != self.transcript && !self.isFinishing { self.lastWordAt = Date() }
+                    self.transcript = heard
                     if self.isFinishing {
                         if result.isFinal { self.completeSpeech() }
                         return
@@ -325,7 +333,20 @@ final class Assistant: ObservableObject {
             }
         }
         do { audio.prepare(); try audio.start(); listening = true; status = "Listening… speak a command" }
-        catch { stopAudio(); status = error.localizedDescription }
+        catch { stopAudio(); status = error.localizedDescription; return }
+        // Finish automatically once the user pauses; Finish and ⌘⇧Space still end it sooner.
+        listenStartedAt = Date(); lastWordAt = nil
+        endpointTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard listening, session == speechSession else { return }
+                switch endpointer.check(startedAt: listenStartedAt, lastWordAt: lastWordAt, now: Date()) {
+                case .listen: continue
+                case .finish: finish(); return
+                case .noSpeech: resetSession(); status = "No speech heard. Press ⌘⇧Space to try again."; return
+                }
+            }
+        }
     }
 
     private func stopAudio() {
@@ -336,13 +357,13 @@ final class Assistant: ObservableObject {
     }
 
     private func resetSession() {
-        debounce?.cancel(); finishTask?.cancel(); planTask?.cancel(); isFinishing = false; stopAudio(); session = UUID().uuidString
+        debounce?.cancel(); finishTask?.cancel(); planTask?.cancel(); endpointTask?.cancel(); isFinishing = false; stopAudio(); session = UUID().uuidString
         completed = []; transcript = ""; ending = false; busy = false
     }
 
     func finish() {
         guard listening else { return }
-        debounce?.cancel(); listening = false; isFinishing = true
+        debounce?.cancel(); endpointTask?.cancel(); listening = false; isFinishing = true
         audio.stop()
         if tapInstalled { audio.inputNode.removeTap(onBus: 0); tapInstalled = false }
         speechRequest?.endAudio()
@@ -445,7 +466,7 @@ struct MainView: View {
                     }
                 }.frame(height: 85)
             }
-            Text("\(assistant.speechInfo)\nTry “open Spotify”, “remind me to call mum at 5”, “search the web for pasta recipes” or “set volume to 30”.")
+            Text("\(assistant.speechInfo)\nPress ⌘⇧Space and speak. Utter runs your command when you pause. Try “open Spotify”, “remind me to call mum at 5” or “write hello in notes”.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(4)
         }
         .padding(30).frame(width: 660).background(Color(red: 0.055, green: 0.075, blue: 0.09))

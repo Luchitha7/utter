@@ -96,6 +96,20 @@ struct CoreTests {
             expect(apps.resolve("broken") == nil, "empty .app folder is skipped")
         }
 
+        // MARK: End of speech
+
+        await test("end of speech: finishes after a pause, gives up on silence") {
+            let start = Date(timeIntervalSinceReferenceDate: 0)
+            let endpointer = Endpointer(silence: 1.5, noSpeechTimeout: 8)
+            func at(_ seconds: TimeInterval) -> Date { start.addingTimeInterval(seconds) }
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: nil, now: at(3)), .listen, "quiet but still waiting")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: nil, now: at(8.1)), .noSpeech, "nothing said")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: at(2), now: at(3)), .listen, "short pause")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: at(2), now: at(3.6)), .finish, "stopped talking")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: at(9), now: at(10)), .listen, "long command still going")
+            expectEqual(endpointer.check(startedAt: start, lastWordAt: at(9), now: at(10.6)), .finish, "long command done")
+        }
+
         // MARK: Due dates
 
         await test("due dates: worked out in code from what was said") {
