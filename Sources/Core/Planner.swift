@@ -88,7 +88,8 @@ final class Planner {
     static let openNotes = Pattern(#"\b(?:open|launch|start)\s+(?:the\s+)?notes\b"#)
     static let negation = Pattern(#"\b(?:don[’']?t|do not|never mind|nevermind|cancel|stop)\b"#)
     static let toolTalk = Pattern(#"\btools?\b|function"#)
-    static let noteBody = Pattern(#"\bnote\s+(?:saying|that says|with the text)\s+(.+)$"#, dotAll: true)
+    static let addToNote = Pattern(#"^(?:please\s+)?add\s+(.+?)\s+to\s+(?:my|the|a)\s+(?:[\p{L}\p{N}]+\s+)?notes?[.!]?$"#, dotAll: true)
+    static let noteBody = Pattern(#"\b(?:note\s+(?:saying|that says|with the text)|(?:jot|write)\s+down(?:\s+that)?|(?:take|make)\s+a\s+note(?:\s+(?:that|saying|of))?)\s*[:,]?\s+(.+)$"#, dotAll: true)
 
     let model: String
     let server: URL
@@ -162,7 +163,7 @@ final class Planner {
             guard let app = apps.resolve(name) else { return .refused("I couldn’t find an app called “\(name)”.") }
             return .step(.openApp(name: app.deletingPathExtension().lastPathComponent, path: app.path, bundle: AppCatalog.bundleID(app)))
         case "create_note":
-            guard let body = Self.verbatimNote(text) ?? string("body") else { return .skipped }
+            guard let body = Self.noteText(said: text, proposed: string("body")) else { return .skipped }
             return .step(.createNote(body: body))
         case "create_reminder":
             guard let title = string("title", limit: 500) else { return .skipped }
@@ -196,9 +197,35 @@ final class Planner {
         }
     }
 
-    /// If the user used the explicit note phrasing, keep their exact words rather than the model's.
-    static func verbatimNote(_ text: String) -> String? {
-        noteBody.firstMatch(in: text).map { $0.group(1).trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// The note text to save, taken from what the user said wherever possible:
+    /// 1. the words after a trigger phrase ("note saying…", "jot down…", "take a note that…"), or the X in "add X to my notes";
+    /// 2. otherwise the model's text, if it appears in the transcript, copied from the transcript;
+    /// 3. otherwise the model's text as a last resort.
+    static func noteText(said: String, proposed: String?) -> String? {
+        if let match = addToNote.firstMatch(in: said) ?? noteBody.firstMatch(in: said) {
+            let body = match.group(1).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !body.isEmpty { return body }
+        }
+        guard let proposed else { return nil }
+        return transcriptSlice(matching: proposed, in: said) ?? proposed
+    }
+
+    /// Finds `phrase` in `text` as a run of whole words, ignoring case and punctuation,
+    /// and returns the original wording from `text`.
+    static func transcriptSlice(matching phrase: String, in text: String) -> String? {
+        func words(_ string: String) -> [(word: String, range: Range<String.Index>)] {
+            let pattern = try! NSRegularExpression(pattern: #"[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*"#)
+            return pattern.matches(in: string, range: NSRange(string.startIndex..., in: string)).map { match in
+                let range = Range(match.range, in: string)!
+                return (string[range].lowercased().replacingOccurrences(of: "’", with: "'"), range)
+            }
+        }
+        let said = words(text), wanted = words(phrase).map(\.word)
+        guard !wanted.isEmpty, wanted.count <= said.count else { return nil }
+        for start in 0...(said.count - wanted.count) where said[start..<(start + wanted.count)].map(\.word) == wanted {
+            return String(text[said[start].range.lowerBound..<said[start + wanted.count - 1].range.upperBound])
+        }
+        return nil
     }
 
     static func normalizeDue(_ due: String) -> String? {

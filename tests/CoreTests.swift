@@ -139,6 +139,28 @@ struct CoreTests {
             expect(fallback.contains("reminders"), "fallback reply")
         }
 
+        await test("planner: note text comes from the transcript, not the model") {
+            let cases: [(said: String, proposed: String, saved: String)] = [
+                ("jot down buy milk and eggs", "Buy milk and eggs.", "buy milk and eggs"),
+                ("open notes and write down call the dentist", "Call dentist", "call the dentist"),
+                ("take a note that the meeting moved to 3", "Meeting moved to 3pm.", "the meeting moved to 3"),
+                ("make a note: pay rent on Friday", "Pay rent Friday", "pay rent on Friday"),
+                ("add buy oat milk to my shopping note", "Buy oat milk.", "buy oat milk"),
+                ("add call the plumber to my notes", "add call the plumber to my notes", "call the plumber"),
+                ("please add pick up the parcel to the note", "Pick up parcel", "pick up the parcel"),
+                ("put Sam's birthday is on Friday in my notes", "Sam’s birthday is on Friday", "Sam's birthday is on Friday"),
+            ]
+            for (said, proposed, saved) in cases {
+                let plan = try await planner([call("create_note", ["body": proposed])]).plan(said)
+                expectEqual(plan.steps.filter { $0.key == "note" }, [.createNote(body: saved)], said)
+            }
+        }
+
+        await test("planner: a reworded note with no trigger phrase keeps the model's text") {
+            let plan = try await planner([call("create_note", ["body": "Sam birthday Friday"])]).plan("remember in notes that it's Sam's birthday this Friday")
+            expectEqual(plan.steps, [.createNote(body: "Sam birthday Friday")])
+        }
+
         await test("planner: explicit open Notes is kept") {
             let plan = try await planner([call("create_note", ["body": "x"])]).plan("open notes and create a note saying buy milk")
             expectEqual(plan.steps.map(\.key), ["open:test.notes", "note"])
