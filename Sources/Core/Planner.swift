@@ -7,7 +7,8 @@ enum Step: Equatable {
     case createNote(body: String)
     case createReminder(title: String, due: String?)
     case runShortcut(name: String, input: String?)
-    case openURL(String, label: String)
+    /// `browser` is the path of the browser to use, or nil for the default browser.
+    case openURL(String, label: String, browser: String?)
     case setVolume(Int)
 
     /// Identifies the side effect, so the same action is never run twice for one command.
@@ -17,7 +18,7 @@ enum Step: Equatable {
         case .createNote: return "note"
         case .createReminder(let title, _): return "reminder:" + title.lowercased()
         case .runShortcut(let name, _): return "shortcut:" + name
-        case .openURL(let url, _): return "url:" + url.lowercased()
+        case .openURL(let url, _, _): return "url:" + url.lowercased()
         case .setVolume: return "volume"
         }
     }
@@ -28,7 +29,7 @@ enum Step: Equatable {
         case .createNote(let body): return "Create note: " + body.prefix(60)
         case .createReminder(let title, let due): return "Remind me: \(title)" + (due.map { " (\($0.replacingOccurrences(of: "T", with: " ")))" } ?? "")
         case .runShortcut(let name, _): return "Run shortcut \(name)"
-        case .openURL(_, let label): return label
+        case .openURL(_, let label, _): return label
         case .setVolume(let percent): return "Set volume to \(percent)%"
         }
     }
@@ -61,8 +62,9 @@ final class Planner {
         ("run_shortcut", "Run one of the user's Apple Shortcuts by name.",
          ["name": ["type": "string", "description": "Exact shortcut name from the available list."],
           "input": ["type": "string", "description": "Optional text to pass to the shortcut."]], ["name"]),
-        ("web_search", "Search the web in the default browser.", ["query": ["type": "string"]], ["query"]),
-        ("open_url", "Open a website in the default browser.",
+        ("web_search", "Search the web, or search a site such as YouTube. Opens in a new browser tab.",
+         ["query": ["type": "string", "description": "What to search for."]], ["query"]),
+        ("open_url", "Open a website in a new browser tab.",
          ["url": ["type": "string", "description": "A website address such as youtube.com."]], ["url"]),
         ("set_volume", "Set the Mac output volume.",
          ["percent": ["type": "integer", "description": "0 to 100. Use 0 to mute."]], ["percent"]),
@@ -78,6 +80,8 @@ final class Planner {
     - If the user corrects themselves ("open Safari, actually Chrome"), act only on their final intent.
     - For notes and reminders, copy the user's own words exactly. Do not rephrase, summarise or add anything.
     - If the user asks to open an app, call open_app for it, even when a later step uses that app.
+    - Opening a website or a search always opens a new browser tab, so "open a new tab" needs no step of its own.
+    - Only call run_shortcut when the user asks for a shortcut.
     - If the request is a question, conversation, or something no tool can do, call no tools and reply to the user in one short friendly sentence. Never mention tools.
     - Only use shortcut names from this list:
     """
@@ -137,6 +141,7 @@ final class Planner {
            case .step(let note) = validate("create_note", [:], text: text, now: now) {
             steps.append(note)
         }
+        steps = applySearch(to: steps, text: text)
         // The model sometimes folds "open Notes" into create_note; keep the explicit open the user asked for.
         if steps.contains(where: { if case .createNote = $0 { return true }; return false }), Self.openNotes.contains(text),
            case .step(let notes) = validate("open_app", ["name": "Notes"], text: text), !steps.contains(where: { $0.key == notes.key }) {
@@ -174,12 +179,13 @@ final class Planner {
         case "run_shortcut":
             let name = string("name", limit: 200) ?? ""
             guard let match = shortcuts.first(where: { $0.lowercased() == name.lowercased() }) else {
-                return .refused("There’s no shortcut called “\(name)”.")
+                // The model sometimes invents a shortcut for things it can't do; only complain if one was asked for.
+                return text.range(of: "shortcut", options: .caseInsensitive) != nil ? .refused("There’s no shortcut called “\(name)”.") : .skipped
             }
             return .step(.runShortcut(name: match, input: string("input")))
         case "web_search":
             guard let query = string("query", limit: 500) else { return .skipped }
-            return .step(.openURL("https://www.google.com/search?q=" + Self.formEncode(query), label: "Search the web for \(query)"))
+            return .step(.openURL("https://www.google.com/search?q=" + Self.formEncode(query), label: "Search the web for \(query)", browser: nil))
         case "open_url":
             var url = string("url", limit: 2000) ?? ""
             if url.range(of: "^https?://", options: [.regularExpression, .caseInsensitive]) == nil {
@@ -189,7 +195,7 @@ final class Planner {
                   let host = components.host, host.contains("."), !host.contains(" ") else {
                 return .refused("That doesn’t look like a website address.")
             }
-            return .step(.openURL(url, label: "Open " + host + (components.port.map { ":\($0)" } ?? "")))
+            return .step(.openURL(url, label: "Open " + host + (components.port.map { ":\($0)" } ?? ""), browser: nil))
         case "set_volume":
             let value = arguments["percent"]
             let percent = (value as? Int) ?? (value as? Double).map { Int($0) } ?? (value as? String).flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
@@ -197,6 +203,46 @@ final class Planner {
             return .step(.setVolume(max(0, min(100, percent))))
         default:
             return .skipped
+        }
+    }
+
+    static let browserNames: Set<String> = ["google chrome", "safari", "brave browser", "firefox", "microsoft edge", "arc",
+                                            "opera", "vivaldi", "chromium", "orion", "zen browser"]
+
+    func isBrowser(_ path: String) -> Bool {
+        Self.browserNames.contains(AppCatalog.normalize(URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent))
+    }
+
+    /// Makes web searches follow what was said: the site and query come from the transcript, a search the model
+    /// dropped (e.g. after "open a new tab") is added back, and pages open in the browser the user named or opened.
+    func applySearch(to steps: [Step], text: String) -> [Step] {
+        var steps = steps
+        let opened = steps.compactMap { step -> String? in
+            if case .openApp(_, let path, _) = step, isBrowser(path) { return path }
+            return nil
+        }.first
+        if let intent = SearchIntent.parse(text) {
+            let siteHost = intent.site.flatMap { URL(string: $0.home)?.host?.replacingOccurrences(of: "www.", with: "") }
+            let replaced = steps.indices.filter { index in
+                guard case .openURL(let url, _, _) = steps[index] else { return false }
+                if url.hasPrefix(SearchIntent.Site.google.search) { return true }
+                guard let siteHost, let host = URL(string: url)?.host else { return false }
+                return host == siteHost || host.hasSuffix("." + siteHost)
+            }
+            let hasURL = steps.contains { if case .openURL = $0 { return true }; return false }
+            let mentionsTab = text.range(of: "new tab", options: .caseInsensitive) != nil
+            if !replaced.isEmpty || steps.isEmpty || (!hasURL && (opened != nil || mentionsTab)) {
+                let position = replaced.first ?? steps.count
+                replaced.reversed().forEach { steps.remove(at: $0) }
+                steps.insert(.openURL(intent.url, label: intent.label, browser: nil), at: min(position, steps.count))
+            }
+        }
+        let named = SearchIntent.mentionedBrowser(text).flatMap { apps.resolve($0) }.map(\.path).flatMap { isBrowser($0) ? $0 : nil }
+        guard let browser = named ?? opened else { return steps }
+        let name = URL(fileURLWithPath: browser).deletingPathExtension().lastPathComponent
+        return steps.map { step in
+            guard case .openURL(let url, let label, nil) = step else { return step }
+            return .openURL(url, label: label + " in " + name, browser: browser)
         }
     }
 
@@ -233,7 +279,7 @@ final class Planner {
     }
 
     /// Encodes like an HTML form: letters, digits and -._~ stay, spaces become +.
-    static func formEncode(_ text: String) -> String {
+    nonisolated static func formEncode(_ text: String) -> String {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~ ")
         return (text.addingPercentEncoding(withAllowedCharacters: allowed) ?? text).replacingOccurrences(of: " ", with: "+")
     }

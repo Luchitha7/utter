@@ -277,11 +277,18 @@ final class Assistant: ObservableObject {
             }
             defer { if let inputFile { try? FileManager.default.removeItem(at: inputFile) } }
             try await runTool("/usr/bin/shortcuts", arguments, failure: "The shortcut “\(name)” failed.")
-        case .openURL(let text, _):
+        case .openURL(let text, _, let browser):
             guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
                 throw PlannerError("That doesn’t look like a website address")
             }
-            guard NSWorkspace.shared.open(url) else { throw PlannerError("Could not open \(text)") }
+            if let browser {
+                guard browser.hasSuffix(".app"), FileManager.default.fileExists(atPath: browser) else { throw PlannerError("That browser isn’t installed") }
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                _ = try await NSWorkspace.shared.open([url], withApplicationAt: URL(fileURLWithPath: browser), configuration: configuration)
+            } else {
+                guard NSWorkspace.shared.open(url) else { throw PlannerError("Could not open \(text)") }
+            }
         case .setVolume(let percent):
             try await runTool("/usr/bin/osascript", ["-e", "on run argv", "-e", "set volume output volume (item 1 of argv as integer)", "-e", "end run", String(percent)],
                               failure: "Could not change the volume.")
