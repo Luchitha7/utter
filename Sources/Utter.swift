@@ -44,7 +44,7 @@ final class Assistant: ObservableObject {
     init() {
         speechInfo = recognizer?.supportsOnDeviceRecognition == true
             ? "Speech stays on this Mac · English (US)"
-            : "Speech uses Apple’s recognition service · English (US)"
+            : "On-device speech isn’t available on this Mac · type commands instead"
         let environment = ProcessInfo.processInfo.environment, defaults = UserDefaults.standard
         let model = environment["UTTER_MODEL"] ?? defaults.string(forKey: "OllamaModel") ?? "qwen3:4b-instruct"
         let server = environment["UTTER_OLLAMA_URL"] ?? defaults.string(forKey: "OllamaURL") ?? "http://127.0.0.1:11434"
@@ -282,10 +282,14 @@ final class Assistant: ObservableObject {
         }
         guard authorization == .authorized else { status = "Allow Utter speech recognition in System Settings → Privacy & Security."; return }
         guard let recognizer, recognizer.isAvailable else { status = "Speech recognition isn’t available right now."; return }
+        // Audio never leaves the Mac: without on-device recognition, Utter doesn't listen at all.
+        guard recognizer.supportsOnDeviceRecognition else {
+            status = "This Mac can’t recognise English speech on-device, so Utter won’t listen. Typed commands still work."; return
+        }
         resetSession()
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+        request.requiresOnDeviceRecognition = true
         request.contextualStrings = ["Notes", "Safari", "Spotify", "Chrome", "Finder", "create a note saying"]
         speechRequest = request
         let node = audio.inputNode
