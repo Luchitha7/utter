@@ -76,6 +76,15 @@ struct CoreTests {
             expectEqual(Grammar.decide("open notes", completed: ["open:com.apple.Notes"]).key, nil)
         }
 
+        await test("grammar: AI mode never acts on a half-finished sentence") {
+            let partials = ["open", "open safari", "open safari actually", "open safari actually chrome"]
+            for text in partials {
+                if case .open = Grammar.decideWhileSpeaking(text, aiMode: true).action { expect(false, "opened early on: \(text)") }
+            }
+            expectEqual(Grammar.decideWhileSpeaking("open safari never mind", aiMode: true).action, .cancel)
+            expectEqual(Grammar.decideWhileSpeaking("open safari", aiMode: false).key, "open:com.apple.Safari")
+        }
+
         // MARK: App catalog
 
         await test("apps: spoken names resolve") {

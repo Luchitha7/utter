@@ -56,6 +56,16 @@ enum Grammar {
     }
 }
 
+extension Grammar {
+    /// What to do with a partial transcript while the user is still speaking. In AI mode nothing runs
+    /// until they finish, so a later "actually…" can still change the plan; only "never mind" acts early.
+    static func decideWhileSpeaking(_ text: String, aiMode: Bool, completed: Set<String> = []) -> Decision {
+        let decision = decide(text, final: false, completed: completed)
+        guard aiMode else { return decision }
+        return decision.action == .cancel ? decision : Decision(action: .wait(reason: "Listening…"), key: nil)
+    }
+}
+
 /// A small case-insensitive wrapper around NSRegularExpression.
 struct Pattern {
     let expression: NSRegularExpression

@@ -92,7 +92,8 @@ final class Assistant: ObservableObject {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if final && engine == "ai" { plan(text); return }
         let started = Date()
-        let decision = Grammar.decide(text, final: final, completed: completed)
+        let decision = final ? Grammar.decide(text, final: true, completed: completed)
+                             : Grammar.decideWhileSpeaking(text, aiMode: engine == "ai", completed: completed)
         latency = "\(Int(Date().timeIntervalSince(started) * 1000)) ms"
         switch decision.action {
         case .cancel:
